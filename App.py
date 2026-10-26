@@ -74,28 +74,60 @@ def load_project_meta(sheet_id, sheet_name=META_SHEET_NAME):
         raw = pd.read_csv(url, header=None, dtype=str)
         raw = raw.dropna(how="all")
         n_r, n_c = raw.shape
+
         for r in range(n_r):
             for c in range(n_c):
-                cell = str(raw.iat[r, c]).strip()
-                cell_low = cell.lower()
-                for k in ["project name", "project start date", "project end date", "note"]:
-                    if k in cell_low:
+                cell_val = str(raw.iat[r, c]).strip()
+                if not cell_val or cell_val.lower() == "nan":
+                    continue
+
+                cell_clean = cell_val.lower().replace("*", "").replace(":", "").strip()
+
+                # فحص الحقول المستهدفة
+                targets = [
+                    ("project name", ["project name", "project", "اسم المشروع"]),
+                    ("project start date", ["project start date", "start date", "project start", "تاريخ البداية"]),
+                    ("project end date", ["project end date", "end date", "project end", "تاريخ النهاية"]),
+                    ("note", ["note", "notes", "ملاحظة", "ملاحظات", "note*"]),
+                ]
+
+                for key, matches in targets:
+                    if meta[key] is not None and key != "project name":
+                        continue
+
+                    if any(m in cell_clean for m in matches):
                         val = None
-                        # Check right cell
-                        for c2 in range(c + 1, n_c):
-                            cand = raw.iat[r, c2]
-                            if pd.notnull(cand) and str(cand).strip() != "":
-                                val = str(cand).strip()
-                                break
-                        # Check cell below
-                        if val is None:
-                            for r2 in range(r + 1, n_r):
+
+                        # الحالة 1: القيمة في نفس الخلية مفصولة بنقطتين (مثل Note*: Text)
+                        if ":" in cell_val:
+                            parts = cell_val.split(":", 1)
+                            if len(parts) > 1 and parts[1].strip():
+                                val = parts[1].strip()
+
+                        # الحالة 2: فحص الخلايا جهة اليمين في نفس الصف
+                        if not val:
+                            for c2 in range(c + 1, min(c + 6, n_c)):
+                                cand = raw.iat[r, c2]
+                                if pd.notnull(cand):
+                                    cand_str = str(cand).strip()
+                                    if cand_str and cand_str.lower() != "nan":
+                                        val = cand_str
+                                        break
+
+                        # الحالة 3: فحص الخلايا في الأسفل في نفس العمود (للجداول الرأسية)
+                        if not val:
+                            for r2 in range(r + 1, min(r + 6, n_r)):
                                 cand = raw.iat[r2, c]
-                                if pd.notnull(cand) and str(cand).strip() != "":
-                                    val = str(cand).strip()
-                                    break
+                                if pd.notnull(cand):
+                                    cand_str = str(cand).strip()
+                                    if cand_str and cand_str.lower() != "nan":
+                                        val = cand_str
+                                        break
+
                         if val:
-                            meta[k] = val
+                            meta[key] = val
+                            break
+
         return meta
     except Exception:
         return meta
@@ -294,24 +326,25 @@ def build_wbs_pdf(df, today, meta=None):
     from reportlab.pdfbase.pdfmetrics import stringWidth
 
     meta = meta or {}
-    project_title = meta.get("project name") or "Gantt Chart chart"
+    project_title = str(meta.get("project name") or "Gantt Chart chart").strip()
     p_start = meta.get("project start date")
     p_end = meta.get("project end date")
     p_note = meta.get("note")
 
-    # Dates text
+    # تنسيق سطر التواريخ
     dates_part = ""
     if p_start and p_end:
-        dates_part = f"Project Dates: {p_start}  →  {p_end}"
+        dates_part = f"Project Start Date: {p_start}   |   Project End Date: {p_end}"
     elif p_start:
-        dates_part = f"Project Start: {p_start}"
+        dates_part = f"Project Start Date: {p_start}"
     elif p_end:
-        dates_part = f"Project End: {p_end}"
+        dates_part = f"Project End Date: {p_end}"
 
+    # حساب ارتفاع الترويسة ديناميكياً لتشمل التواريخ والملاحظة
     PW, PH = landscape(A3)
-    # Dynamic Title Block Height to accommodate Dates & Notes
     M = 28
-    TITLE_H = 48 if (dates_part or p_note) else 36
+    extra_lines = (1 if dates_part else 0) + (1 if p_note else 0)
+    TITLE_H = 34 + (extra_lines * 12)
     HDR_H = 30
     FOOT_H = 16
     W = [52, 262, 66, 66, 30, 76]
@@ -363,24 +396,34 @@ def build_wbs_pdf(df, today, meta=None):
             text = text[:-1]
         return text + "..."
 
-    # ---- Header / Title Area ----
-    c.setFont("Helvetica-Bold", 16)
+    # ---- 1. ترويسة العنوان والبيانات أسفل الاسم ----
+    curr_y = PH - M - 14
+    c.setFont("Helvetica-Bold", 15)
     c.setFillColor(hexc("#1f2933"))
-    c.drawString(M, PH - M - 15, project_title)
-
-    # Sub-data line: Project Start Date, Project End Date, Note*
-    meta_line = " | ".join(filter(None, [dates_part, f"Note*: {p_note}" if p_note else None]))
-    curr_y = PH - M - 27
-    if meta_line:
-        c.setFont("Helvetica-Bold", 8)
-        c.setFillColor(hexc("#2b4360"))
-        c.drawString(M, curr_y, fit(meta_line, "Helvetica-Bold", 8, PW - 2 * M - 140))
-        curr_y -= 11
-
+    c.drawString(M, curr_y, fit(project_title, "Helvetica-Bold", 15, PW - 2 * M - 120))
     c.setFont("Helvetica", 7.5)
     c.setFillColor(hexc("#52606d"))
+    c.drawRightString(PW - M, curr_y, f"Generated: {today:%d-%b-%Y}")
+
+    # سطر التواريخ
+    if dates_part:
+        curr_y -= 12
+        c.setFont("Helvetica-Bold", 8)
+        c.setFillColor(hexc("#204a6e"))
+        c.drawString(M, curr_y, fit(dates_part, "Helvetica-Bold", 8, PW - 2 * M - 120))
+
+    # سطر الملاحظة Note* بشكل مخصص وبارز
+    if p_note:
+        curr_y -= 11
+        c.setFont("Helvetica-Bold", 7.5)
+        c.setFillColor(hexc("#b02a37"))  # لون مميز للـ Note
+        c.drawString(M, curr_y, fit(f"Note*: {p_note}", "Helvetica-Bold", 7.5, PW - 2 * M - 120))
+
+    # سطر التوجيهات
+    curr_y -= 10
+    c.setFont("Helvetica", 7)
+    c.setFillColor(hexc("#6b7280"))
     c.drawString(M, curr_y, "Grey bands = weekend (Fri & Sat)  |  Diamond = Milestone  |  Black bar = stage summary  |  Red dashed line = today")
-    c.drawRightString(PW - M, PH - M - 15, f"Generated: {today:%d-%b-%Y}")
 
     # Header backgrounds
     c.setFillColor(hexc("#eef1f5"))
@@ -567,7 +610,6 @@ with col_a:
 with col_b:
     st.link_button("🔗 Open Google Sheet", f"https://docs.google.com/spreadsheets/d/{WBS_SHEET_ID}/edit")
 
-# جلب بيانات Sheet2 وبيانات الـ WBS
 meta_info = load_project_meta(WBS_SHEET_ID, META_SHEET_NAME)
 
 try:
@@ -580,13 +622,12 @@ except Exception as e:
     )
     st.stop()
 
-# عرض بطاقة معلومات المشروع من Sheet2 في واجهة Streamlit
-if any([meta_info.get("project start date"), meta_info.get("project end date"), meta_info.get("note")]):
-    with st.container():
-        c1, c2, c3 = st.columns([1.5, 1.5, 3])
-        c1.caption(f"🗓️ **Start Date:** {meta_info.get('project start date') or '-'}")
-        c2.caption(f"🏁 **End Date:** {meta_info.get('project end date') or '-'}")
-        c3.caption(f"📝 **Note\*:** {meta_info.get('note') or '-'}")
+# مربع تفصيلي يوضح البيانات المقروءة للتأكد من التقاط Note*
+with st.expander("📌 Project Metadata (Sheet2 Preview)", expanded=True):
+    col_m1, col_m2, col_m3 = st.columns([1.5, 1.5, 3])
+    col_m1.markdown(f"**Start Date:** `{meta_info.get('project start date') or 'Not Found'}`")
+    col_m2.markdown(f"**End Date:** `{meta_info.get('project end date') or 'Not Found'}`")
+    col_m3.markdown(f"**Note\*:** `{meta_info.get('note') or 'Not Found'}`")
 
 code_col = _pick_col(df, "wbs code", "code")
 stage_col = _pick_col(df, "stage")
