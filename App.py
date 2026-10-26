@@ -61,44 +61,66 @@ def load_wbs(url):
     return df
 
 
+META_GID = "573784510"  # gid of Sheet2 (from the sheet URL)
+
+META_LABELS = {
+    "project name": ("project name",),
+    "project start date": ("project start date", "project start"),
+    "project end date": ("project end date", "project end"),
+    "note": ("note", "notes"),
+}
+
+
+def _parse_meta(raw):
+    """Find each label in column cells (exact match) and take the next non-empty value."""
+    meta, found = {}, 0
+    n_r, n_c = raw.shape
+    for r in range(n_r):
+        for c in range(n_c):
+            label = str(raw.iat[r, c]).strip().lower().rstrip(":*").strip()
+            for key, aliases in META_LABELS.items():
+                if label in aliases and key not in meta:
+                    val = None
+                    for c2 in range(c + 1, n_c):          # value to the right
+                        cand = str(raw.iat[r, c2]).strip()
+                        if cand:
+                            val = cand
+                            break
+                    if val is None:                        # or in the cell below
+                        for r2 in range(r + 1, n_r):
+                            cand = str(raw.iat[r2, c]).strip()
+                            if cand:
+                                val = cand
+                                break
+                    if val:
+                        meta[key] = val
+                        found += 1
+    return meta, found
+
+
 @st.cache_data(ttl=60, show_spinner="Loading Project Info from Sheet2...")
-def load_project_meta(sheet_id, sheet_name=META_SHEET_NAME):
-    url = build_sheet_name_url(sheet_id, sheet_name)
+def load_project_meta(sheet_id, sheet_name=META_SHEET_NAME, gid=META_GID):
     meta = {
         "project name": "Gantt Chart chart",
         "project start date": None,
         "project end date": None,
         "note": None,
     }
-    try:
-        raw = pd.read_csv(url, header=None, dtype=str)
-        raw = raw.dropna(how="all")
-        n_r, n_c = raw.shape
-        for r in range(n_r):
-            for c in range(n_c):
-                cell = str(raw.iat[r, c]).strip()
-                cell_low = cell.lower()
-                for k in ["project name", "project start date", "project end date", "note"]:
-                    if k in cell_low:
-                        val = None
-                        # Check right cell
-                        for c2 in range(c + 1, n_c):
-                            cand = raw.iat[r, c2]
-                            if pd.notnull(cand) and str(cand).strip() != "":
-                                val = str(cand).strip()
-                                break
-                        # Check cell below
-                        if val is None:
-                            for r2 in range(r + 1, n_r):
-                                cand = raw.iat[r2, c]
-                                if pd.notnull(cand) and str(cand).strip() != "":
-                                    val = str(cand).strip()
-                                    break
-                        if val:
-                            meta[k] = val
-        return meta
-    except Exception:
-        return meta
+    # Raw export by gid first (no type guessing), then gviz by sheet name as fallback
+    urls = []
+    if gid:
+        urls.append(build_csv_url(sheet_id, gid))
+    urls.append(build_sheet_name_url(sheet_id, sheet_name))
+    for url in urls:
+        try:
+            raw = pd.read_csv(url, header=None, dtype=str, keep_default_na=False)
+            parsed, found = _parse_meta(raw)
+            if found:
+                meta.update(parsed)
+                return meta
+        except Exception:
+            continue
+    return meta
 
 
 # ----------------------------------------------------------------------
@@ -220,10 +242,10 @@ def build_wbs_html(df, dw, today):
 
         for _, r in g.iterrows():
             is_milestone = r.get("IsMilestone", False)
-            tip = (f"{r['Code']}  {r['Task']}\n{fmt(r['Start Date'])}" + 
+            tip = (f"{r['Code']}  {r['Task']}\n{fmt(r['Start Date'])}" +
                    (f" → {fmt(r['End Date'])}\n{r['WorkDays']} working days (Sun-Thu)\n" if not is_milestone else "\n[Milestone]\n") +
                    f"Dept: {r['Disc']}\nResponsible: {r['Resp']}")
-            
+
             left_rows.append(
                 f'<div class="lrow">'
                 f'<div class="c-wbs" title="{esc(r["Code"])}">{esc(r["Code"])}</div>'
@@ -309,11 +331,36 @@ def build_wbs_pdf(df, today, meta=None):
         dates_part = f"Project End: {p_end}"
 
     PW, PH = landscape(A3)
-    # Dynamic Title Block Height to accommodate Dates & Notes
     M = 28
-    TITLE_H = 48 if (dates_part or p_note) else 36
+    TITLE_H = 48 if dates_part else 36
     HDR_H = 30
-    FOOT_H = 16
+
+    # ---- Footer note (wrapped into lines) ----
+    NOTE_FS = 8
+    NOTE_LEAD = 10.5
+
+    def wrap_text(text, font, size, maxw):
+        lines = []
+        for para in str(text).replace("\r", "").split("\n"):
+            words, cur = para.split(), ""
+            for w in words:
+                trial = (cur + " " + w).strip()
+                if stringWidth(trial, font, size) <= maxw:
+                    cur = trial
+                else:
+                    if cur:
+                        lines.append(cur)
+                    cur = w
+            lines.append(cur)
+        return lines
+
+    note_lines = []
+    if p_note:
+        note_lines = wrap_text(f"Note*: {p_note}", "Helvetica", NOTE_FS, PW - 2 * M)
+        note_lines = note_lines[:6]  # max 6 lines
+    NOTE_H = (len(note_lines) * NOTE_LEAD + 8) if note_lines else 0
+    FOOT_H = 16 + NOTE_H
+
     W = [52, 262, 66, 66, 30, 76]
     LW = sum(W)
     TL_W = PW - 2 * M - LW
@@ -368,8 +415,8 @@ def build_wbs_pdf(df, today, meta=None):
     c.setFillColor(hexc("#1f2933"))
     c.drawString(M, PH - M - 15, project_title)
 
-    # Sub-data line: Project Start Date, Project End Date, Note*
-    meta_line = " | ".join(filter(None, [dates_part, f"Note*: {p_note}" if p_note else None]))
+    # Sub-data line: Project Start / End dates (the Note is printed at the bottom)
+    meta_line = dates_part
     curr_y = PH - M - 27
     if meta_line:
         c.setFont("Helvetica-Bold", 8)
@@ -493,7 +540,7 @@ def build_wbs_pdf(df, today, meta=None):
                 mx = x_of(r["Start"]) + (dpx / 2)
                 my = y_bot + (row_h / 2)
                 sz = max(3.0, row_h * 0.32)
-                
+
                 c.setFillColor(hexc(col))
                 p = c.beginPath()
                 p.moveTo(mx, my + sz)
@@ -548,6 +595,17 @@ def build_wbs_pdf(df, today, meta=None):
     c.rect(M, body_bot, LW + TL_W, body_top - body_bot + HDR_H, stroke=1, fill=0)
     c.line(M, body_top, X0 + TL_W, body_top)
 
+    # ---- Note at the bottom of the page (from Sheet2) ----
+    if note_lines:
+        ny = body_bot - 20  # below the "Today" label
+        c.setStrokeColor(hexc("#9aa4b2"))
+        c.setLineWidth(0.5)
+        c.line(M, ny + 8, PW - M, ny + 8)
+        c.setFont("Helvetica", NOTE_FS)
+        c.setFillColor(hexc("#2b4360"))
+        for k, line in enumerate(note_lines):
+            c.drawString(M, ny - k * NOTE_LEAD, line)
+
     c.showPage()
     c.save()
     return buf.getvalue()
@@ -567,8 +625,8 @@ with col_a:
 with col_b:
     st.link_button("🔗 Open Google Sheet", f"https://docs.google.com/spreadsheets/d/{WBS_SHEET_ID}/edit")
 
-# جلب بيانات Sheet2 وبيانات الـ WBS
-meta_info = load_project_meta(WBS_SHEET_ID, META_SHEET_NAME)
+# Load Sheet2 meta and WBS data
+meta_info = load_project_meta(WBS_SHEET_ID, META_SHEET_NAME, META_GID)
 
 try:
     df = load_wbs(wbs_url)
@@ -580,13 +638,16 @@ except Exception as e:
     )
     st.stop()
 
-# عرض بطاقة معلومات المشروع من Sheet2 في واجهة Streamlit
+if not meta_info.get("note"):
+    st.warning("⚠️ The Note was not found in Sheet2 (expected 'Note' in column A and the text in column B).")
+
+# Project info card from Sheet2
 if any([meta_info.get("project start date"), meta_info.get("project end date"), meta_info.get("note")]):
     with st.container():
         c1, c2, c3 = st.columns([1.5, 1.5, 3])
         c1.caption(f"🗓️ **Start Date:** {meta_info.get('project start date') or '-'}")
         c2.caption(f"🏁 **End Date:** {meta_info.get('project end date') or '-'}")
-        c3.caption(f"📝 **Note\*:** {meta_info.get('note') or '-'}")
+        c3.caption(f"📝 **Note\\*:** {meta_info.get('note') or '-'}")
 
 code_col = _pick_col(df, "wbs code", "code")
 stage_col = _pick_col(df, "stage")
@@ -655,12 +716,18 @@ df["WorkDays"] = work_days
 df["CalendarDays"] = (df["End Date"] - df["Start Date"]).dt.days + 1
 df["OnWeekend"] = weekend_flag
 
-code = df[code_col].astype(str) if code_col else pd.Series([""] * len(df), index=df.index)
-task = df[task_col].astype(str) if task_col else pd.Series(["Task"] * len(df), index=df.index)
+def _txt(col, default=""):
+    if col:
+        return df[col].fillna("").astype(str).str.strip().replace("nan", "")
+    return pd.Series([default] * len(df), index=df.index)
+
+
+code = _txt(code_col)
+task = _txt(task_col, "Task")
 df["Task"] = (code + " · " + task).str.strip(" ·")
-df["Stage"] = df[stage_col].astype(str) if stage_col else "-"
-df["Disc"] = df[disc_col].astype(str) if disc_col else "-"
-df["Resp"] = df[resp_col].astype(str) if resp_col else "-"
+df["Stage"] = _txt(stage_col, "-")
+df["Disc"] = _txt(disc_col, "-")
+df["Resp"] = _txt(resp_col, "-")
 
 df = df.sort_values(["Start", "End"]).reset_index(drop=True)
 
