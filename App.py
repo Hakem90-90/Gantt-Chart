@@ -220,10 +220,10 @@ def build_wbs_html(df, dw, today):
 
         for _, r in g.iterrows():
             is_milestone = r.get("IsMilestone", False)
-            tip = (f"{r['Code']}  {r['Task']}\n{fmt(r['Start Date'])}" +
+            tip = (f"{r['Code']}  {r['Task']}\n{fmt(r['Start Date'])}" + 
                    (f" → {fmt(r['End Date'])}\n{r['WorkDays']} working days (Sun-Thu)\n" if not is_milestone else "\n[Milestone]\n") +
                    f"Dept: {r['Disc']}\nResponsible: {r['Resp']}")
-
+            
             left_rows.append(
                 f'<div class="lrow">'
                 f'<div class="c-wbs" title="{esc(r["Code"])}">{esc(r["Code"])}</div>'
@@ -309,36 +309,11 @@ def build_wbs_pdf(df, today, meta=None):
         dates_part = f"Project End: {p_end}"
 
     PW, PH = landscape(A3)
+    # Dynamic Title Block Height to accommodate Dates & Notes
     M = 28
-    TITLE_H = 48 if dates_part else 36
+    TITLE_H = 48 if (dates_part or p_note) else 36
     HDR_H = 30
-
-    # ---- Footer note (wrapped into lines) ----
-    NOTE_FS = 8
-    NOTE_LEAD = 10.5
-
-    def wrap_text(text, font, size, maxw):
-        lines = []
-        for para in str(text).replace("\r", "").split("\n"):
-            words, cur = para.split(), ""
-            for w in words:
-                trial = (cur + " " + w).strip()
-                if stringWidth(trial, font, size) <= maxw:
-                    cur = trial
-                else:
-                    if cur:
-                        lines.append(cur)
-                    cur = w
-            lines.append(cur)
-        return lines
-
-    note_lines = []
-    if p_note:
-        note_lines = wrap_text(f"Note*: {p_note}", "Helvetica", NOTE_FS, PW - 2 * M)
-        note_lines = note_lines[:6]  # max 6 lines
-    NOTE_H = (len(note_lines) * NOTE_LEAD + 8) if note_lines else 0
-    FOOT_H = 16 + NOTE_H
-
+    FOOT_H = 16
     W = [52, 262, 66, 66, 30, 76]
     LW = sum(W)
     TL_W = PW - 2 * M - LW
@@ -393,8 +368,8 @@ def build_wbs_pdf(df, today, meta=None):
     c.setFillColor(hexc("#1f2933"))
     c.drawString(M, PH - M - 15, project_title)
 
-    # Sub-data line: Project Start / End dates (the Note is printed at the bottom)
-    meta_line = dates_part
+    # Sub-data line: Project Start Date, Project End Date, Note*
+    meta_line = " | ".join(filter(None, [dates_part, f"Note*: {p_note}" if p_note else None]))
     curr_y = PH - M - 27
     if meta_line:
         c.setFont("Helvetica-Bold", 8)
@@ -518,7 +493,7 @@ def build_wbs_pdf(df, today, meta=None):
                 mx = x_of(r["Start"]) + (dpx / 2)
                 my = y_bot + (row_h / 2)
                 sz = max(3.0, row_h * 0.32)
-
+                
                 c.setFillColor(hexc(col))
                 p = c.beginPath()
                 p.moveTo(mx, my + sz)
@@ -573,17 +548,6 @@ def build_wbs_pdf(df, today, meta=None):
     c.rect(M, body_bot, LW + TL_W, body_top - body_bot + HDR_H, stroke=1, fill=0)
     c.line(M, body_top, X0 + TL_W, body_top)
 
-    # ---- Note at the bottom of the page (from Sheet2) ----
-    if note_lines:
-        ny = body_bot - 20  # below the "Today" label
-        c.setStrokeColor(hexc("#9aa4b2"))
-        c.setLineWidth(0.5)
-        c.line(M, ny + 8, PW - M, ny + 8)
-        c.setFont("Helvetica", NOTE_FS)
-        c.setFillColor(hexc("#2b4360"))
-        for k, line in enumerate(note_lines):
-            c.drawString(M, ny - k * NOTE_LEAD, line)
-
     c.showPage()
     c.save()
     return buf.getvalue()
@@ -603,7 +567,7 @@ with col_a:
 with col_b:
     st.link_button("🔗 Open Google Sheet", f"https://docs.google.com/spreadsheets/d/{WBS_SHEET_ID}/edit")
 
-# Load Sheet2 meta and WBS data
+# جلب بيانات Sheet2 وبيانات الـ WBS
 meta_info = load_project_meta(WBS_SHEET_ID, META_SHEET_NAME)
 
 try:
@@ -616,13 +580,13 @@ except Exception as e:
     )
     st.stop()
 
-# Project info card from Sheet2
+# عرض بطاقة معلومات المشروع من Sheet2 في واجهة Streamlit
 if any([meta_info.get("project start date"), meta_info.get("project end date"), meta_info.get("note")]):
     with st.container():
         c1, c2, c3 = st.columns([1.5, 1.5, 3])
         c1.caption(f"🗓️ **Start Date:** {meta_info.get('project start date') or '-'}")
         c2.caption(f"🏁 **End Date:** {meta_info.get('project end date') or '-'}")
-        c3.caption(f"📝 **Note\\*:** {meta_info.get('note') or '-'}")
+        c3.caption(f"📝 **Note\*:** {meta_info.get('note') or '-'}")
 
 code_col = _pick_col(df, "wbs code", "code")
 stage_col = _pick_col(df, "stage")
