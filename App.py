@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import datetime
+from urllib.parse import quote
 import html as _html
 import streamlit.components.v1 as components
 
@@ -11,8 +12,9 @@ import streamlit.components.v1 as components
 st.set_page_config(page_title="Gantt Chart chart", layout="wide")
 st.title("📊 Gantt Chart chart - ACKD")
 
-# ----- Google Sheet WBS Configuration -----
+# ----- Google Sheet Configuration -----
 WBS_SHEET_ID = "1kjQtf7UkFNrgn0imyqAlYEzTPzUbR5evY5lQ8alZUIQ"
+META_SHEET_NAME = "Sheet2"
 
 # Working week: Sunday to Thursday (Friday & Saturday are the weekend)
 NP_WEEKMASK = "1111001"
@@ -25,8 +27,15 @@ def build_csv_url(sheet_id, gid=None):
     return url
 
 
+def build_sheet_name_url(sheet_id, sheet_name):
+    return (
+        f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq"
+        f"?tqx=out:csv&sheet={quote(sheet_name)}"
+    )
+
+
 # ----------------------------------------------------------------------
-# 2. Load WBS Data
+# 2. Data Loading (WBS & Sheet2 Project Meta)
 # ----------------------------------------------------------------------
 def _pick_col(df, *keys):
     for c in df.columns:
@@ -52,8 +61,48 @@ def load_wbs(url):
     return df
 
 
+@st.cache_data(ttl=60, show_spinner="Loading Project Info from Sheet2...")
+def load_project_meta(sheet_id, sheet_name=META_SHEET_NAME):
+    url = build_sheet_name_url(sheet_id, sheet_name)
+    meta = {
+        "project name": "Gantt Chart chart",
+        "project start date": None,
+        "project end date": None,
+        "note": None,
+    }
+    try:
+        raw = pd.read_csv(url, header=None, dtype=str)
+        raw = raw.dropna(how="all")
+        n_r, n_c = raw.shape
+        for r in range(n_r):
+            for c in range(n_c):
+                cell = str(raw.iat[r, c]).strip()
+                cell_low = cell.lower()
+                for k in ["project name", "project start date", "project end date", "note"]:
+                    if k in cell_low:
+                        val = None
+                        # Check right cell
+                        for c2 in range(c + 1, n_c):
+                            cand = raw.iat[r, c2]
+                            if pd.notnull(cand) and str(cand).strip() != "":
+                                val = str(cand).strip()
+                                break
+                        # Check cell below
+                        if val is None:
+                            for r2 in range(r + 1, n_r):
+                                cand = raw.iat[r2, c]
+                                if pd.notnull(cand) and str(cand).strip() != "":
+                                    val = str(cand).strip()
+                                    break
+                        if val:
+                            meta[k] = val
+        return meta
+    except Exception:
+        return meta
+
+
 # ----------------------------------------------------------------------
-# 3. HTML & PDF Renderers
+# 3. HTML & PDF Builders
 # ----------------------------------------------------------------------
 STAGE_COLORS = [
     "#2f6fb3", "#e07b39", "#3a9d6b", "#8e5ea2", "#c9a227",
@@ -108,7 +157,7 @@ body{margin:0;font-family:"Segoe UI",Arial,sans-serif;font-size:12px;color:#1f29
 def build_wbs_html(df, dw, today):
     esc = lambda v: _html.escape(str(v), quote=True)
     ROW_H, HDR_H = 26, 60
-    W = [64, 300, 98, 98, 46, 100]  # WBS | Task | Start | End | Days | Dept
+    W = [64, 300, 98, 98, 46, 100]
     LW = sum(W)
 
     origin = df["Start"].min().normalize() - pd.Timedelta(days=2)
@@ -127,7 +176,6 @@ def build_wbs_html(df, dw, today):
 
     fmt = lambda t: pd.Timestamp(t).strftime("%a %d-%b-%y")
 
-    # Header
     months, i = "", 0
     while i < n_days:
         j = i
@@ -187,7 +235,6 @@ def build_wbs_html(df, dw, today):
             )
 
             if is_milestone:
-                # وضع علامة المعين (Diamond) في منتصف خانة اليوم
                 mx = x_of(r["Start"]) + max(0, (dw // 2) - 6)
                 right_rows.append(
                     f'<div class="rrow">'
@@ -239,15 +286,34 @@ def build_wbs_html(df, dw, today):
     return html_doc, comp_h + 8
 
 
-def build_wbs_pdf(df, today, title="Gantt Chart chart"):
+def build_wbs_pdf(df, today, meta=None):
     import io
     from reportlab.lib.pagesizes import A3, landscape
     from reportlab.lib import colors
     from reportlab.pdfgen import canvas
     from reportlab.pdfbase.pdfmetrics import stringWidth
 
+    meta = meta or {}
+    project_title = meta.get("project name") or "Gantt Chart chart"
+    p_start = meta.get("project start date")
+    p_end = meta.get("project end date")
+    p_note = meta.get("note")
+
+    # Dates text
+    dates_part = ""
+    if p_start and p_end:
+        dates_part = f"Project Dates: {p_start}  →  {p_end}"
+    elif p_start:
+        dates_part = f"Project Start: {p_start}"
+    elif p_end:
+        dates_part = f"Project End: {p_end}"
+
     PW, PH = landscape(A3)
-    M, TITLE_H, HDR_H, FOOT_H = 28, 36, 30, 16
+    # Dynamic Title Block Height to accommodate Dates & Notes
+    M = 28
+    TITLE_H = 48 if (dates_part or p_note) else 36
+    HDR_H = 30
+    FOOT_H = 16
     W = [52, 262, 66, 66, 30, 76]
     LW = sum(W)
     TL_W = PW - 2 * M - LW
@@ -286,7 +352,7 @@ def build_wbs_pdf(df, today, title="Gantt Chart chart"):
 
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=(PW, PH))
-    c.setTitle(title)
+    c.setTitle(project_title)
     hexc = colors.HexColor
 
     def fit(text, font, size, maxw):
@@ -297,14 +363,24 @@ def build_wbs_pdf(df, today, title="Gantt Chart chart"):
             text = text[:-1]
         return text + "..."
 
-    # Title
-    c.setFont("Helvetica-Bold", 17)
+    # ---- Header / Title Area ----
+    c.setFont("Helvetica-Bold", 16)
     c.setFillColor(hexc("#1f2933"))
-    c.drawString(M, PH - M - 16, title)
-    c.setFont("Helvetica", 8)
+    c.drawString(M, PH - M - 15, project_title)
+
+    # Sub-data line: Project Start Date, Project End Date, Note*
+    meta_line = " | ".join(filter(None, [dates_part, f"Note*: {p_note}" if p_note else None]))
+    curr_y = PH - M - 27
+    if meta_line:
+        c.setFont("Helvetica-Bold", 8)
+        c.setFillColor(hexc("#2b4360"))
+        c.drawString(M, curr_y, fit(meta_line, "Helvetica-Bold", 8, PW - 2 * M - 140))
+        curr_y -= 11
+
+    c.setFont("Helvetica", 7.5)
     c.setFillColor(hexc("#52606d"))
-    c.drawString(M, PH - M - 29, "Grey bands = weekend (Friday & Saturday)  |  Diamond = Milestone  |  Black bar = stage summary  |  Red dashed line = today")
-    c.drawRightString(PW - M, PH - M - 16, f"Generated: {today:%d-%b-%Y}")
+    c.drawString(M, curr_y, "Grey bands = weekend (Fri & Sat)  |  Diamond = Milestone  |  Black bar = stage summary  |  Red dashed line = today")
+    c.drawRightString(PW - M, PH - M - 15, f"Generated: {today:%d-%b-%Y}")
 
     # Header backgrounds
     c.setFillColor(hexc("#eef1f5"))
@@ -414,7 +490,6 @@ def build_wbs_pdf(df, today, title="Gantt Chart chart"):
             lw = stringWidth(lab, "Helvetica", lab_fs)
 
             if is_milestone:
-                # رسم المعين (Diamond) في الـ PDF
                 mx = x_of(r["Start"]) + (dpx / 2)
                 my = y_bot + (row_h / 2)
                 sz = max(3.0, row_h * 0.32)
@@ -435,7 +510,6 @@ def build_wbs_pdf(df, today, title="Gantt Chart chart"):
                 else:
                     c.drawRightString(mx - sz - 3, ty, lab)
             else:
-                # رسم شريط المهمة الاعتيادي
                 bx, bw = x_of(r["Start"]), w_of(r["Start"], r["End"])
                 bh = max(3, row_h * 0.55)
                 c.setFillColor(hexc(col))
@@ -480,7 +554,7 @@ def build_wbs_pdf(df, today, title="Gantt Chart chart"):
 
 
 # ----------------------------------------------------------------------
-# 4. Main Application Interface
+# 4. Main Interface
 # ----------------------------------------------------------------------
 wbs_url = build_csv_url(WBS_SHEET_ID)
 
@@ -488,19 +562,31 @@ col_a, col_b = st.columns([1, 3])
 with col_a:
     if st.button("🔄 Refresh from Google Sheet", use_container_width=True):
         load_wbs.clear()
+        load_project_meta.clear()
         st.rerun()
 with col_b:
     st.link_button("🔗 Open Google Sheet", f"https://docs.google.com/spreadsheets/d/{WBS_SHEET_ID}/edit")
 
+# جلب بيانات Sheet2 وبيانات الـ WBS
+meta_info = load_project_meta(WBS_SHEET_ID, META_SHEET_NAME)
+
 try:
     df = load_wbs(wbs_url)
-    st.success("✅ WBS data loaded from Google Sheet.")
+    st.success(f"✅ Data loaded. Active Project: **{meta_info.get('project name')}**")
 except Exception as e:
     st.error(
         f"Could not read the WBS Google Sheet ({e}). Make sure sharing is set to "
         "'Anyone with the link: Viewer'."
     )
     st.stop()
+
+# عرض بطاقة معلومات المشروع من Sheet2 في واجهة Streamlit
+if any([meta_info.get("project start date"), meta_info.get("project end date"), meta_info.get("note")]):
+    with st.container():
+        c1, c2, c3 = st.columns([1.5, 1.5, 3])
+        c1.caption(f"🗓️ **Start Date:** {meta_info.get('project start date') or '-'}")
+        c2.caption(f"🏁 **End Date:** {meta_info.get('project end date') or '-'}")
+        c3.caption(f"📝 **Note\*:** {meta_info.get('note') or '-'}")
 
 code_col = _pick_col(df, "wbs code", "code")
 stage_col = _pick_col(df, "stage")
@@ -509,8 +595,6 @@ disc_col = _pick_col(df, "discipline")
 resp_col = _pick_col(df, "responsible")
 
 df = df[df["End Date"] >= df["Start Date"]].copy()
-
-# تحديد علامة الـ Milestone (المهام التي تبدأ وتنتهي في نفس اليوم الأصلي)
 df["IsMilestone"] = (df["Start Date"].dt.date == df["End Date"].dt.date)
 
 # ---- Filters ----
@@ -555,7 +639,6 @@ for s, e, is_m in zip(df["Start Date"], df["End Date"], df["IsMilestone"]):
         plot_start.append(s_fix)
         plot_end.append(e_fix)
     elif snap and is_m and s_fix > e_fix:
-        # إذا كان Milestone ووقع في عطلة نهاية الأسبوع يتم نقله إلى أقرب يوم عمل
         plot_start.append(s_fix)
         plot_end.append(s_fix)
     else:
@@ -599,7 +682,7 @@ if n_wk:
         + ("Their bars were snapped to the nearest working day." if snap else "Bars shown with original dates.")
     )
 
-# ---- MS Project style Gantt ----
+# ---- Interactive Gantt Chart ----
 df["Code"] = code
 html_doc, comp_h = build_wbs_html(df, zoom, today)
 components.html(html_doc, height=comp_h, scrolling=False)
@@ -611,11 +694,12 @@ st.caption(
 
 # ---- PDF export ----
 try:
-    pdf_bytes = build_wbs_pdf(df, today)
+    pdf_bytes = build_wbs_pdf(df, today, meta=meta_info)
+    clean_pname = "".join(ch for ch in str(meta_info.get("project name")) if ch.isalnum() or ch in (" ", "_", "-")).strip()
     st.download_button(
         "🖨️ Download PDF (A3 - full schedule on one page)",
         data=pdf_bytes,
-        file_name=f"WBS_Gantt_{today:%Y%m%d}.pdf",
+        file_name=f"{clean_pname}_{today:%Y%m%d}.pdf",
         mime="application/pdf",
     )
 except ImportError:
