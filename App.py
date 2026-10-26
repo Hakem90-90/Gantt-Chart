@@ -233,4 +233,405 @@ def build_wbs_html(df, dw, today):
         f"<div class='left'><div class='hdr'><div class='lhdr'>{lhdr}</div></div>{''.join(left_rows)}</div>"
         f"<div class='right'><div class='hdr'>"
         f"<div class='trow'>{months}</div><div class='trow'>{weeks}</div><div class='trow'>{day_cells}</div></div>"
-        f
+        f"<div class='body'>{''.join(right_rows)}{today_html}</div></div>"
+        f"</div></div><script>document.getElementById('wrap').scrollLeft={scroll_x};</script>"
+    )
+    return html_doc, comp_h + 8
+
+
+def build_wbs_pdf(df, today, title="Gantt Chart chart"):
+    import io
+    from reportlab.lib.pagesizes import A3, landscape
+    from reportlab.lib import colors
+    from reportlab.pdfgen import canvas
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+
+    PW, PH = landscape(A3)
+    M, TITLE_H, HDR_H, FOOT_H = 28, 36, 30, 16
+    W = [52, 262, 66, 66, 30, 76]
+    LW = sum(W)
+    TL_W = PW - 2 * M - LW
+
+    origin = df["Start"].min().normalize() - pd.Timedelta(days=2)
+    origin = origin - pd.Timedelta(days=(origin.dayofweek + 1) % 7)
+    last = df["EndPlus"].max().normalize() + pd.Timedelta(days=18)
+    n_days = int((last - origin).days)
+    n_days += (-n_days) % 7
+    days = pd.date_range(origin, periods=n_days, freq="D")
+    dpx = TL_W / n_days
+    X0 = M + LW
+
+    x_of = lambda ts: X0 + (pd.Timestamp(ts).normalize() - origin).days * dpx
+    w_of = lambda s, e: max(((pd.Timestamp(e).normalize() - pd.Timestamp(s).normalize()).days + 1) * dpx, 1.5)
+    fmt = lambda t: pd.Timestamp(t).strftime("%a %d-%b-%y")
+
+    stage_order = df.groupby("Stage")["Start"].min().sort_values().index.tolist()
+    color_of = {s: STAGE_COLORS[i % len(STAGE_COLORS)] for i, s in enumerate(stage_order)}
+    rows = []
+    for stage in stage_order:
+        g = df[df["Stage"] == stage].sort_values(["Start", "End"])
+        s_all, e_all = g["Start Date"].min(), g["End Date"].max()
+        wd = int(np.busday_count(s_all.date(), e_all.date() + datetime.timedelta(days=1), weekmask=NP_WEEKMASK))
+        rows.append(("stage", stage, s_all, e_all, wd, g["Start"].min(), g["End"].max(), color_of[stage]))
+        for _, r in g.iterrows():
+            rows.append(("task", r, color_of[stage]))
+
+    n_rows = len(rows)
+    avail = PH - 2 * M - TITLE_H - HDR_H - FOOT_H
+    row_h = min(avail / n_rows, 22)
+    fs = max(4.5, min(8, row_h * 0.55))
+    top = PH - M - TITLE_H
+    body_top = top - HDR_H
+    body_bot = body_top - n_rows * row_h
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=(PW, PH))
+    c.setTitle(title)
+    hexc = colors.HexColor
+
+    def fit(text, font, size, maxw):
+        text = str(text)
+        if stringWidth(text, font, size) <= maxw:
+            return text
+        while text and stringWidth(text + "...", font, size) > maxw:
+            text = text[:-1]
+        return text + "..."
+
+    # Title
+    c.setFont("Helvetica-Bold", 17)
+    c.setFillColor(hexc("#1f2933"))
+    c.drawString(M, PH - M - 16, title)
+    c.setFont("Helvetica", 8)
+    c.setFillColor(hexc("#52606d"))
+    c.drawString(M, PH - M - 29, "Grey bands = weekend (Friday & Saturday)  |  Diamond = Milestone  |  Black bar = stage summary  |  Red dashed line = today")
+    c.drawRightString(PW - M, PH - M - 16, f"Generated: {today:%d-%b-%Y}")
+
+    # Header backgrounds
+    c.setFillColor(hexc("#eef1f5"))
+    c.rect(M, body_top, LW + TL_W, HDR_H, stroke=0, fill=1)
+
+    for i, row in enumerate(rows):
+        if row[0] == "stage":
+            c.setFillColor(hexc("#e8edf3"))
+            c.rect(M, body_top - (i + 1) * row_h, LW + TL_W, row_h, stroke=0, fill=1)
+
+    c.saveState()
+    c.setFillColor(hexc("#8c96a5"))
+    c.setFillAlpha(0.20)
+    for k, d in enumerate(days):
+        if d.dayofweek in (4, 5):
+            c.rect(X0 + k * dpx, body_bot, dpx, body_top - body_bot + HDR_H, stroke=0, fill=1)
+    c.restoreState()
+
+    c.setStrokeColor(hexc("#cfd5dd"))
+    c.setLineWidth(0.4)
+    c.setFont("Helvetica", 5.5)
+    c.setFillColor(hexc("#374151"))
+    for k in range(0, n_days, 7):
+        x = X0 + k * dpx
+        c.line(x, body_bot, x, body_top)
+        c.line(x, body_top, x, body_top + HDR_H / 2)
+        lab = f"{days[k]:%d %b}" if 7 * dpx >= 24 else f"{days[k]:%d}"
+        c.drawString(x + 2, body_top + 4.5, lab)
+
+    c.setFont("Helvetica-Bold", 7.5)
+    i = 0
+    while i < n_days:
+        j = i
+        while j < n_days and days[j].month == days[i].month:
+            j += 1
+        x, w = X0 + i * dpx, (j - i) * dpx
+        c.setStrokeColor(hexc("#9aa4b2"))
+        c.line(x, body_top + HDR_H / 2, x, body_top + HDR_H)
+        lab = f"{days[i]:%B %Y}" if w >= 70 else (f"{days[i]:%b %y}" if w >= 34 else "")
+        c.setFillColor(hexc("#1f2933"))
+        c.drawString(x + 3, body_top + HDR_H / 2 + 5, lab)
+        i = j
+    c.setStrokeColor(hexc("#9aa4b2"))
+    c.setLineWidth(0.6)
+    c.line(X0, body_top + HDR_H / 2, X0 + TL_W, body_top + HDR_H / 2)
+
+    titles = ["WBS", "Task Name", "Start", "End", "Days", "Department"]
+    x = M
+    c.setFont("Helvetica-Bold", 8)
+    c.setFillColor(hexc("#1f2933"))
+    for t, w in zip(titles, W):
+        if t == "Days":
+            c.drawRightString(x + w - 4, body_top + 11, t)
+        else:
+            c.drawString(x + 4, body_top + 11, t)
+        x += w
+
+    for i, row in enumerate(rows):
+        y_top = body_top - i * row_h
+        y_bot = y_top - row_h
+        ty = y_bot + (row_h - fs) / 2 + fs * 0.18
+        c.setStrokeColor(hexc("#d9dee5"))
+        c.setLineWidth(0.3)
+        c.line(M, y_bot, X0 + TL_W, y_bot)
+
+        if row[0] == "stage":
+            _, stage, s_all, e_all, wd, ps, pe, col = row
+            c.setFillColor(hexc(col))
+            c.rect(M + W[0] + 4, y_bot + (row_h - 6) / 2, 6, 6, stroke=0, fill=1)
+            c.setFillColor(hexc("#1f2933"))
+            c.setFont("Helvetica-Bold", fs)
+            c.drawString(M + W[0] + 14, ty, fit(stage, "Helvetica-Bold", fs, W[1] - 18))
+            c.drawString(M + W[0] + W[1] + 4, ty, fmt(s_all))
+            c.drawString(M + W[0] + W[1] + W[2] + 4, ty, fmt(e_all))
+            c.drawRightString(M + sum(W[:5]) - 4, ty, str(wd))
+
+            bx, bw = x_of(ps), w_of(ps, pe)
+            bh = max(2.5, row_h * 0.22)
+            by = y_bot + (row_h - bh) / 2 + bh * 0.4
+            c.setFillColor(hexc("#1f2933"))
+            c.rect(bx, by, bw, bh, stroke=0, fill=1)
+            tri = bh * 1.1
+            for tx in (bx, bx + bw):
+                p = c.beginPath()
+                p.moveTo(tx - tri * 0.7, by + bh)
+                p.lineTo(tx + tri * 0.7, by + bh)
+                p.lineTo(tx, by + bh - tri * 1.3)
+                p.close()
+                c.drawPath(p, stroke=0, fill=1)
+        else:
+            _, r, col = row
+            is_milestone = r.get("IsMilestone", False)
+
+            c.setFillColor(hexc("#52606d"))
+            c.setFont("Helvetica", fs)
+            c.drawString(M + 4, ty, fit(r["Code"], "Helvetica", fs, W[0] - 6))
+            c.setFillColor(hexc("#1f2933"))
+            task_label = ("* " if is_milestone else "") + str(r["Task"])
+            c.drawString(M + W[0] + 10, ty, fit(task_label, "Helvetica", fs, W[1] - 14))
+            c.drawString(M + W[0] + W[1] + 4, ty, fmt(r["Start Date"]))
+            c.drawString(M + W[0] + W[1] + W[2] + 4, ty, fmt(r["End Date"]))
+            c.drawRightString(M + sum(W[:5]) - 4, ty, str(r["WorkDays"]))
+            c.drawString(M + sum(W[:5]) + 4, ty, fit(r["Disc"], "Helvetica", fs, W[5] - 6))
+
+            lab_fs = max(4, fs - 1)
+            lab = str(r["Resp"])
+            lw = stringWidth(lab, "Helvetica", lab_fs)
+
+            if is_milestone:
+                # رسم المعين (Diamond) في الـ PDF
+                mx = x_of(r["Start"]) + (dpx / 2)
+                my = y_bot + (row_h / 2)
+                sz = max(3.0, row_h * 0.32)
+                
+                c.setFillColor(hexc(col))
+                p = c.beginPath()
+                p.moveTo(mx, my + sz)
+                p.lineTo(mx + sz, my)
+                p.lineTo(mx, my - sz)
+                p.lineTo(mx - sz, my)
+                p.close()
+                c.drawPath(p, stroke=0, fill=1)
+
+                c.setFillColor(hexc("#52606d"))
+                c.setFont("Helvetica", lab_fs)
+                if mx + sz + 3 + lw <= X0 + TL_W:
+                    c.drawString(mx + sz + 3, ty, lab)
+                else:
+                    c.drawRightString(mx - sz - 3, ty, lab)
+            else:
+                # رسم شريط المهمة الاعتيادي
+                bx, bw = x_of(r["Start"]), w_of(r["Start"], r["End"])
+                bh = max(3, row_h * 0.55)
+                c.setFillColor(hexc(col))
+                c.roundRect(bx, y_bot + (row_h - bh) / 2, bw, bh, min(1.5, bh / 3), stroke=0, fill=1)
+
+                c.setFillColor(hexc("#52606d"))
+                c.setFont("Helvetica", lab_fs)
+                if bx + bw + 3 + lw <= X0 + TL_W:
+                    c.drawString(bx + bw + 3, ty, lab)
+                else:
+                    c.drawRightString(bx - 3, ty, lab)
+
+    c.setStrokeColor(hexc("#d3d8df"))
+    c.setLineWidth(0.3)
+    x = M
+    for w in W[:-1]:
+        x += w
+        c.line(x, body_bot, x, body_top + HDR_H)
+    c.setStrokeColor(hexc("#9aa4b2"))
+    c.setLineWidth(1)
+    c.line(X0, body_bot, X0, body_top + HDR_H)
+
+    if origin <= today < last:
+        tx = x_of(today) + dpx / 2
+        c.setStrokeColor(hexc("#e03131"))
+        c.setLineWidth(1.1)
+        c.setDash(3, 2)
+        c.line(tx, body_bot, tx, body_top + HDR_H)
+        c.setDash()
+        c.setFont("Helvetica-Bold", 6)
+        c.setFillColor(hexc("#e03131"))
+        c.drawCentredString(tx, body_bot - 8, "Today")
+
+    c.setStrokeColor(hexc("#9aa4b2"))
+    c.setLineWidth(0.8)
+    c.rect(M, body_bot, LW + TL_W, body_top - body_bot + HDR_H, stroke=1, fill=0)
+    c.line(M, body_top, X0 + TL_W, body_top)
+
+    c.showPage()
+    c.save()
+    return buf.getvalue()
+
+
+# ----------------------------------------------------------------------
+# 4. Main Application Interface
+# ----------------------------------------------------------------------
+wbs_url = build_csv_url(WBS_SHEET_ID)
+
+col_a, col_b = st.columns([1, 3])
+with col_a:
+    if st.button("🔄 Refresh from Google Sheet", use_container_width=True):
+        load_wbs.clear()
+        st.rerun()
+with col_b:
+    st.link_button("🔗 Open Google Sheet", f"https://docs.google.com/spreadsheets/d/{WBS_SHEET_ID}/edit")
+
+try:
+    df = load_wbs(wbs_url)
+    st.success("✅ WBS data loaded from Google Sheet.")
+except Exception as e:
+    st.error(
+        f"Could not read the WBS Google Sheet ({e}). Make sure sharing is set to "
+        "'Anyone with the link: Viewer'."
+    )
+    st.stop()
+
+code_col = _pick_col(df, "wbs code", "code")
+stage_col = _pick_col(df, "stage")
+task_col = _pick_col(df, "task", "work package")
+disc_col = _pick_col(df, "discipline")
+resp_col = _pick_col(df, "responsible")
+
+df = df[df["End Date"] >= df["Start Date"]].copy()
+
+# تحديد علامة الـ Milestone (المهام التي تبدأ وتنتهي في نفس اليوم الأصلي)
+df["IsMilestone"] = (df["Start Date"].dt.date == df["End Date"].dt.date)
+
+# ---- Filters ----
+f1, f2, f3, f4 = st.columns([2, 2, 2, 1.4])
+with f1:
+    if stage_col:
+        stages = sorted(df[stage_col].dropna().astype(str).unique())
+        sel_stages = st.multiselect("Project Stage", stages, default=stages)
+        df = df[df[stage_col].astype(str).isin(sel_stages)]
+with f2:
+    if disc_col:
+        discs = sorted(df[disc_col].dropna().astype(str).unique())
+        sel_discs = st.multiselect("Discipline", discs, default=discs)
+        df = df[df[disc_col].astype(str).isin(sel_discs)]
+with f3:
+    hide_done = st.checkbox("Filter completed", value=False)
+    snap = st.checkbox(
+        "Snap bars to working days (Sun-Thu)", value=True,
+        help="If a task starts or ends on Friday/Saturday, the bar is moved to the nearest working day.",
+    )
+with f4:
+    zoom = st.select_slider("Zoom (px/day)", options=[8, 12, 16, 20, 26, 32], value=16)
+
+today = pd.Timestamp.today().normalize()
+if hide_done:
+    df = df[df["End Date"] >= today]
+
+if df.empty:
+    st.info("No tasks to display with the current filters.")
+    st.stop()
+
+# ---- Working days (Sun-Thu) ----
+plot_start, plot_end, work_days, weekend_flag = [], [], [], []
+for s, e, is_m in zip(df["Start Date"], df["End Date"], df["IsMilestone"]):
+    s_d, e_d = s.date(), e.date()
+    wd = int(np.busday_count(s_d, e_d + datetime.timedelta(days=1), weekmask=NP_WEEKMASK))
+    s_fix = pd.Timestamp(np.busday_offset(s_d, 0, roll="forward", weekmask=NP_WEEKMASK))
+    e_fix = pd.Timestamp(np.busday_offset(e_d, 0, roll="backward", weekmask=NP_WEEKMASK))
+    on_weekend = (s.dayofweek in (4, 5)) or (e.dayofweek in (4, 5))
+
+    if snap and s_fix <= e_fix:
+        plot_start.append(s_fix)
+        plot_end.append(e_fix)
+    elif snap and is_m and s_fix > e_fix:
+        # إذا كان Milestone ووقع في عطلة نهاية الأسبوع يتم نقله إلى أقرب يوم عمل
+        plot_start.append(s_fix)
+        plot_end.append(s_fix)
+    else:
+        plot_start.append(s)
+        plot_end.append(e)
+
+    work_days.append(wd)
+    weekend_flag.append(on_weekend)
+
+df["Start"] = plot_start
+df["End"] = plot_end
+df["EndPlus"] = df["End"] + pd.Timedelta(days=1)
+df["WorkDays"] = work_days
+df["CalendarDays"] = (df["End Date"] - df["Start Date"]).dt.days + 1
+df["OnWeekend"] = weekend_flag
+
+code = df[code_col].astype(str) if code_col else pd.Series([""] * len(df), index=df.index)
+task = df[task_col].astype(str) if task_col else pd.Series(["Task"] * len(df), index=df.index)
+df["Task"] = (code + " · " + task).str.strip(" ·")
+df["Stage"] = df[stage_col].astype(str) if stage_col else "-"
+df["Disc"] = df[disc_col].astype(str) if disc_col else "-"
+df["Resp"] = df[resp_col].astype(str) if resp_col else "-"
+
+df = df.sort_values(["Start", "End"]).reset_index(drop=True)
+
+# ---- Summary metrics ----
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("Tasks", len(df))
+m2.metric("First start", f"{df['Start Date'].min():%d-%b-%Y}")
+m3.metric("Last end", f"{df['End Date'].max():%d-%b-%Y}")
+m4.metric(
+    "Working days (Sun-Thu)",
+    int(np.busday_count(df["Start Date"].min().date(),
+                        df["End Date"].max().date() + datetime.timedelta(days=1),
+                        weekmask=NP_WEEKMASK)),
+)
+n_wk = int(df["OnWeekend"].sum())
+if n_wk:
+    st.caption(
+        f"ℹ️ {n_wk} task(s) have a start or end date on Friday/Saturday (weekend). "
+        + ("Their bars were snapped to the nearest working day." if snap else "Bars shown with original dates.")
+    )
+
+# ---- MS Project style Gantt ----
+df["Code"] = code
+html_doc, comp_h = build_wbs_html(df, zoom, today)
+components.html(html_doc, height=comp_h, scrolling=False)
+st.caption(
+    "Left: WBS table (Start / End / Department). Right: timeline - grey bands = weekend (Friday & Saturday), "
+    "diamonds = Milestones, black bars = stage summary, red dashed line = today. "
+    "Working days are counted Sunday to Thursday only."
+)
+
+# ---- PDF export ----
+try:
+    pdf_bytes = build_wbs_pdf(df, today)
+    st.download_button(
+        "🖨️ Download PDF (A3 - full schedule on one page)",
+        data=pdf_bytes,
+        file_name=f"WBS_Gantt_{today:%Y%m%d}.pdf",
+        mime="application/pdf",
+    )
+except ImportError:
+    st.info("PDF export requires the 'reportlab' package. Add `reportlab` to requirements.txt.")
+
+with st.expander("📋 Data table"):
+    show = pd.DataFrame({
+        "WBS Code": df["Code"],
+        "Type": np.where(df["IsMilestone"], "Milestone", "Task"),
+        "Stage": df["Stage"],
+        "Task": task,
+        "Department": df["Disc"],
+        "Responsible": df["Resp"],
+        "Start": df["Start Date"].dt.strftime("%a %d-%b-%Y"),
+        "End": df["End Date"].dt.strftime("%a %d-%b-%Y"),
+        "Working days (Sun-Thu)": df["WorkDays"],
+        "Calendar days": df["CalendarDays"],
+    })
+    st.dataframe(show, use_container_width=True, hide_index=True)
