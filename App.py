@@ -167,6 +167,7 @@ body{margin:0;font-family:"Segoe UI",Arial,sans-serif;font-size:12px;color:#1f29
 .bar{position:absolute;top:6px;height:14px;border-radius:3px;box-shadow:inset 0 -2px 0 rgba(0,0,0,.18)}
 .milestone{position:absolute;top:7px;width:12px;height:12px;transform:rotate(45deg);border-radius:1px;box-shadow:0 1px 2px rgba(0,0,0,.25)}
 .lbl{position:absolute;top:0;line-height:__RH__px;font-size:10.5px;color:#52606d;white-space:nowrap}
+.sum-lbl{position:absolute;top:0;line-height:__RH__px;font-size:10.5px;font-weight:700;color:#1f2933;white-space:nowrap}
 .sum{position:absolute;top:7px;height:6px;background:#1f2933}
 .sum:before,.sum:after{content:"";position:absolute;top:6px;border-top:6px solid #1f2933;border-left:5px solid transparent;border-right:5px solid transparent}
 .sum:before{left:-1px}
@@ -237,12 +238,15 @@ def build_wbs_html(df, dw, today):
             f'<div class="c-days">{wd_all}</div><div class="c-dept"></div></div>'
         )
         ps, pe = g["Start"].min(), g["End"].max()
+        sbx, sbw = x_of(ps), w_of(ps, pe)
         right_rows.append(
-            f'<div class="rrow"><div class="sum" style="left:{x_of(ps)}px;width:{w_of(ps, pe)}px" '
-            f'title="{esc(stage)}: {fmt(s_all)} → {fmt(e_all)}"></div></div>'
+            f'<div class="rrow">'
+            f'<div class="sum" style="left:{sbx}px;width:{sbw}px" '
+            f'title="{esc(stage)}: {fmt(s_all)} → {fmt(e_all)}"></div>'
+            f'<div class="sum-lbl" style="left:{sbx + sbw + 8}px">{esc(stage)}</div>'
+            f'</div>'
         )
 
-        # Vertical green dashed line at the end of each Stage
         stage_end_x = x_of(pe) + dw
         if origin <= pe < last:
             stage_end_lines.append(
@@ -353,6 +357,8 @@ def build_wbs_pdf(df, today, meta=None):
 
     NOTE_FS = 8
     NOTE_LEAD = 10.5
+    LEG_FS = 7.5
+    LEG_ROW_H = 14
 
     def wrap_text(text, font, size, maxw):
         lines = []
@@ -372,9 +378,29 @@ def build_wbs_pdf(df, today, meta=None):
     note_lines = []
     if p_note:
         note_lines = wrap_text(f"Note*: {p_note}", "Helvetica", NOTE_FS, PW - 2 * M)
-        note_lines = note_lines[:6]
-    NOTE_H = (len(note_lines) * NOTE_LEAD + 8) if note_lines else 0
-    FOOT_H = 16 + NOTE_H
+        note_lines = note_lines[:5]
+
+    entry_types = sorted(df["EntryType"].dropna().astype(str).unique())
+    entry_color_of = {et: PALETTE[i % len(PALETTE)] for i, et in enumerate(entry_types)}
+
+    # Build legend rows that wrap across page width
+    legend_items = [(et, entry_color_of[et]) for et in entry_types]
+    legend_rows = []
+    cur_row, cur_x = [], 0
+    for et, col in legend_items:
+        item_w = 14 + stringWidth(et, "Helvetica-Bold", LEG_FS) + 18
+        if cur_row and (cur_x + item_w > PW - 2 * M):
+            legend_rows.append(cur_row)
+            cur_row, cur_x = [(et, col, item_w)], item_w
+        else:
+            cur_row.append((et, col, item_w))
+            cur_x += item_w
+    if cur_row:
+        legend_rows.append(cur_row)
+
+    NOTE_H = (len(note_lines) * NOTE_LEAD + 10) if note_lines else 0
+    LEG_H = (len(legend_rows) * LEG_ROW_H + 14) if legend_rows else 0
+    FOOT_H = 16 + NOTE_H + LEG_H
 
     W = [52, 262, 66, 66, 30, 76]
     LW = sum(W)
@@ -394,8 +420,6 @@ def build_wbs_pdf(df, today, meta=None):
     fmt = lambda t: pd.Timestamp(t).strftime("%a %d-%b-%y")
 
     stage_order = df.groupby("Stage")["Start"].min().sort_values().index.tolist()
-    entry_types = sorted(df["EntryType"].dropna().astype(str).unique())
-    entry_color_of = {et: PALETTE[i % len(PALETTE)] for i, et in enumerate(entry_types)}
 
     rows = []
     stage_end_dates = []
@@ -536,6 +560,17 @@ def build_wbs_pdf(df, today, meta=None):
                 p.lineTo(tx, by + bh - tri * 1.3)
                 p.close()
                 c.drawPath(p, stroke=0, fill=1)
+
+            # Stage label right next to black summary bar
+            s_lbl_fs = max(4.5, min(7.5, fs))
+            s_lbl = str(stage)
+            s_lw = stringWidth(s_lbl, "Helvetica-Bold", s_lbl_fs)
+            c.setFont("Helvetica-Bold", s_lbl_fs)
+            c.setFillColor(hexc("#1f2933"))
+            if bx + bw + 5 + s_lw <= X0 + TL_W:
+                c.drawString(bx + bw + 5, ty, s_lbl)
+            else:
+                c.drawRightString(bx - 5, ty, s_lbl)
         else:
             _, r, col = row
             is_milestone = r.get("IsMilestone", False)
@@ -624,15 +659,36 @@ def build_wbs_pdf(df, today, meta=None):
     c.rect(M, body_bot, LW + TL_W, body_top - body_bot + HDR_H, stroke=1, fill=0)
     c.line(M, body_top, X0 + TL_W, body_top)
 
+    # ---- Notes & Color Legend at the bottom of the page ----
+    curr_bottom_y = body_bot - 20
     if note_lines:
-        ny = body_bot - 20
         c.setStrokeColor(hexc("#9aa4b2"))
         c.setLineWidth(0.5)
-        c.line(M, ny + 8, PW - M, ny + 8)
+        c.line(M, curr_bottom_y + 8, PW - M, curr_bottom_y + 8)
         c.setFont("Helvetica", NOTE_FS)
         c.setFillColor(hexc("#2b4360"))
         for k, line in enumerate(note_lines):
-            c.drawString(M, ny - k * NOTE_LEAD, line)
+            c.drawString(M, curr_bottom_y - k * NOTE_LEAD, line)
+        curr_bottom_y -= len(note_lines) * NOTE_LEAD + 6
+
+    if legend_rows:
+        c.setStrokeColor(hexc("#cbd5e1"))
+        c.setLineWidth(0.5)
+        c.line(M, curr_bottom_y + 6, PW - M, curr_bottom_y + 6)
+        c.setFont("Helvetica-Bold", LEG_FS)
+        c.setFillColor(hexc("#1f2933"))
+        c.drawString(M, curr_bottom_y - 4, "Legend (Entry Type):")
+        leg_y = curr_bottom_y - 16
+        for row_items in legend_rows:
+            lx = M
+            for et, col, item_w in row_items:
+                c.setFillColor(hexc(col))
+                c.roundRect(lx, leg_y - 1, 9, 9, 1.5, stroke=0, fill=1)
+                c.setFillColor(hexc("#1f2933"))
+                c.setFont("Helvetica", LEG_FS)
+                c.drawString(lx + 13, leg_y + 1, et)
+                lx += item_w
+            leg_y -= LEG_ROW_H
 
     c.showPage()
     c.save()
