@@ -716,6 +716,7 @@ df["WorkDays"] = work_days
 df["CalendarDays"] = (df["End Date"] - df["Start Date"]).dt.days + 1
 df["OnWeekend"] = weekend_flag
 
+
 def _txt(col, default=""):
     if col:
         return df[col].fillna("").astype(str).str.strip().replace("nan", "")
@@ -724,7 +725,7 @@ def _txt(col, default=""):
 
 code = _txt(code_col)
 task = _txt(task_col, "Task")
-df["Task"] = (code + " · " + task).str.strip(" ·")
+df["Task"] = task
 df["Stage"] = _txt(stage_col, "-")
 df["Disc"] = _txt(disc_col, "-")
 df["Resp"] = _txt(resp_col, "-")
@@ -750,7 +751,7 @@ if n_wk:
     )
 
 # ---- Interactive Gantt Chart ----
-df["Code"] = code
+df["Code"] = _txt(code_col)
 html_doc, comp_h = build_wbs_html(df, zoom, today)
 components.html(html_doc, height=comp_h, scrolling=False)
 st.caption(
@@ -777,7 +778,7 @@ with st.expander("📋 Data table"):
         "WBS Code": df["Code"],
         "Type": np.where(df["IsMilestone"], "Milestone", "Task"),
         "Stage": df["Stage"],
-        "Task": task,
+        "Task": df["Task"],
         "Department": df["Disc"],
         "Responsible": df["Resp"],
         "Start": df["Start Date"].dt.strftime("%a %d-%b-%Y"),
