@@ -106,7 +106,6 @@ def load_project_meta(sheet_id, sheet_name=META_SHEET_NAME, gid=META_GID):
         "project end date": None,
         "note": None,
     }
-    # Raw export by gid first (no type guessing), then gviz by sheet name as fallback
     urls = []
     if gid:
         urls.append(build_csv_url(sheet_id, gid))
@@ -126,7 +125,7 @@ def load_project_meta(sheet_id, sheet_name=META_SHEET_NAME, gid=META_GID):
 # ----------------------------------------------------------------------
 # 3. HTML & PDF Builders
 # ----------------------------------------------------------------------
-STAGE_COLORS = [
+PALETTE = [
     "#2f6fb3", "#e07b39", "#3a9d6b", "#8e5ea2", "#c9a227",
     "#c0504d", "#3b9aa8", "#7a8b3c", "#b5649a", "#6c7a89",
 ]
@@ -173,6 +172,7 @@ body{margin:0;font-family:"Segoe UI",Arial,sans-serif;font-size:12px;color:#1f29
 .sum:before{left:-1px}
 .sum:after{right:-1px}
 .today{position:absolute;top:0;bottom:0;width:0;border-left:2px dashed #e03131;z-index:3;pointer-events:none}
+.stage-end{position:absolute;top:0;bottom:0;width:0;border-left:2px dashed #16a34a;z-index:2;pointer-events:none}
 """
 
 
@@ -217,12 +217,14 @@ def build_wbs_html(df, dw, today):
     )
 
     stage_order = df.groupby("Stage")["Start"].min().sort_values().index.tolist()
-    color_of = {s: STAGE_COLORS[i % len(STAGE_COLORS)] for i, s in enumerate(stage_order)}
+    entry_types = sorted(df["EntryType"].dropna().astype(str).unique())
+    entry_color_of = {et: PALETTE[i % len(PALETTE)] for i, et in enumerate(entry_types)}
 
     left_rows, right_rows = [], []
+    stage_end_lines = []
+
     for stage in stage_order:
         g = df[df["Stage"] == stage].sort_values(["Start", "End"])
-        col = color_of[stage]
         s_all, e_all = g["Start Date"].min(), g["End Date"].max()
         wd_all = int(np.busday_count(s_all.date(), e_all.date() + datetime.timedelta(days=1), weekmask=NP_WEEKMASK))
 
@@ -230,7 +232,7 @@ def build_wbs_html(df, dw, today):
             f'<div class="lrow stage">'
             f'<div class="c-wbs"></div>'
             f'<div class="c-task" style="width:{W[1]}px" title="{esc(stage)}">'
-            f'<span class="sw" style="background:{col}"></span>{esc(stage)}</div>'
+            f'{esc(stage)}</div>'
             f'<div class="c-date">{fmt(s_all)}</div><div class="c-date">{fmt(e_all)}</div>'
             f'<div class="c-days">{wd_all}</div><div class="c-dept"></div></div>'
         )
@@ -240,11 +242,24 @@ def build_wbs_html(df, dw, today):
             f'title="{esc(stage)}: {fmt(s_all)} → {fmt(e_all)}"></div></div>'
         )
 
+        # Vertical green dashed line at the end of each Stage
+        stage_end_x = x_of(pe) + dw
+        if origin <= pe < last:
+            stage_end_lines.append(
+                f'<div class="stage-end" style="left:{stage_end_x}px" '
+                f'title="End of {esc(stage)}: {fmt(e_all)}"></div>'
+            )
+
         for _, r in g.iterrows():
             is_milestone = r.get("IsMilestone", False)
-            tip = (f"{r['Code']}  {r['Task']}\n{fmt(r['Start Date'])}" +
-                   (f" → {fmt(r['End Date'])}\n{r['WorkDays']} working days (Sun-Thu)\n" if not is_milestone else "\n[Milestone]\n") +
-                   f"Dept: {r['Disc']}\nResponsible: {r['Resp']}")
+            col = entry_color_of.get(r["EntryType"], "#2f6fb3")
+            tip = (
+                f"{r['Code']}  {r['Task']}\n"
+                f"Entry Type: {r['EntryType']}\n"
+                f"{fmt(r['Start Date'])}"
+                + (f" → {fmt(r['End Date'])}\n{r['WorkDays']} working days (Sun-Thu)\n" if not is_milestone else "\n[Milestone]\n")
+                + f"Dept: {r['Disc']}\nResponsible: {r['Resp']}"
+            )
 
             left_rows.append(
                 f'<div class="lrow">'
@@ -290,19 +305,21 @@ def build_wbs_html(df, dw, today):
         for k, (t, c) in enumerate(zip(col_titles, col_classes))
     )
 
-    css = (WBS_CSS.replace("__H__", str(comp_h)).replace("__GW__", str(LW + RW))
-           .replace("__LW__", str(LW)).replace("__RW__", str(RW)).replace("__HH__", str(HDR_H))
-           .replace("__RH__", str(ROW_H)).replace("__BH__", str(body_h))
-           .replace("__D5__", str(5 * dw)).replace("__D7__", str(7 * dw))
-           .replace("__W0__", str(W[0])).replace("__W1__", str(W[1])).replace("__W2__", str(W[2]))
-           .replace("__W3__", str(W[4])).replace("__W4__", str(W[5])))
+    css = (
+        WBS_CSS.replace("__H__", str(comp_h)).replace("__GW__", str(LW + RW))
+        .replace("__LW__", str(LW)).replace("__RW__", str(RW)).replace("__HH__", str(HDR_H))
+        .replace("__RH__", str(ROW_H)).replace("__BH__", str(body_h))
+        .replace("__D5__", str(5 * dw)).replace("__D7__", str(7 * dw))
+        .replace("__W0__", str(W[0])).replace("__W1__", str(W[1])).replace("__W2__", str(W[2]))
+        .replace("__W3__", str(W[4])).replace("__W4__", str(W[5]))
+    )
 
     html_doc = (
         f"<style>{css}</style><div class='wrap' id='wrap'><div class='grid'>"
         f"<div class='left'><div class='hdr'><div class='lhdr'>{lhdr}</div></div>{''.join(left_rows)}</div>"
         f"<div class='right'><div class='hdr'>"
         f"<div class='trow'>{months}</div><div class='trow'>{weeks}</div><div class='trow'>{day_cells}</div></div>"
-        f"<div class='body'>{''.join(right_rows)}{today_html}</div></div>"
+        f"<div class='body'>{''.join(right_rows)}{''.join(stage_end_lines)}{today_html}</div></div>"
         f"</div></div><script>document.getElementById('wrap').scrollLeft={scroll_x};</script>"
     )
     return html_doc, comp_h + 8
@@ -321,7 +338,6 @@ def build_wbs_pdf(df, today, meta=None):
     p_end = meta.get("project end date")
     p_note = meta.get("note")
 
-    # Dates text
     dates_part = ""
     if p_start and p_end:
         dates_part = f"Project Dates: {p_start}  →  {p_end}"
@@ -335,7 +351,6 @@ def build_wbs_pdf(df, today, meta=None):
     TITLE_H = 48 if dates_part else 36
     HDR_H = 30
 
-    # ---- Footer note (wrapped into lines) ----
     NOTE_FS = 8
     NOTE_LEAD = 10.5
 
@@ -357,7 +372,7 @@ def build_wbs_pdf(df, today, meta=None):
     note_lines = []
     if p_note:
         note_lines = wrap_text(f"Note*: {p_note}", "Helvetica", NOTE_FS, PW - 2 * M)
-        note_lines = note_lines[:6]  # max 6 lines
+        note_lines = note_lines[:6]
     NOTE_H = (len(note_lines) * NOTE_LEAD + 8) if note_lines else 0
     FOOT_H = 16 + NOTE_H
 
@@ -379,15 +394,19 @@ def build_wbs_pdf(df, today, meta=None):
     fmt = lambda t: pd.Timestamp(t).strftime("%a %d-%b-%y")
 
     stage_order = df.groupby("Stage")["Start"].min().sort_values().index.tolist()
-    color_of = {s: STAGE_COLORS[i % len(STAGE_COLORS)] for i, s in enumerate(stage_order)}
+    entry_types = sorted(df["EntryType"].dropna().astype(str).unique())
+    entry_color_of = {et: PALETTE[i % len(PALETTE)] for i, et in enumerate(entry_types)}
+
     rows = []
+    stage_end_dates = []
     for stage in stage_order:
         g = df[df["Stage"] == stage].sort_values(["Start", "End"])
         s_all, e_all = g["Start Date"].min(), g["End Date"].max()
         wd = int(np.busday_count(s_all.date(), e_all.date() + datetime.timedelta(days=1), weekmask=NP_WEEKMASK))
-        rows.append(("stage", stage, s_all, e_all, wd, g["Start"].min(), g["End"].max(), color_of[stage]))
+        rows.append(("stage", stage, s_all, e_all, wd, g["Start"].min(), g["End"].max()))
+        stage_end_dates.append(g["End"].max())
         for _, r in g.iterrows():
-            rows.append(("task", r, color_of[stage]))
+            rows.append(("task", r, entry_color_of.get(r["EntryType"], "#2f6fb3")))
 
     n_rows = len(rows)
     avail = PH - 2 * M - TITLE_H - HDR_H - FOOT_H
@@ -415,7 +434,6 @@ def build_wbs_pdf(df, today, meta=None):
     c.setFillColor(hexc("#1f2933"))
     c.drawString(M, PH - M - 15, project_title)
 
-    # Sub-data line: Project Start / End dates (the Note is printed at the bottom)
     meta_line = dates_part
     curr_y = PH - M - 27
     if meta_line:
@@ -426,7 +444,10 @@ def build_wbs_pdf(df, today, meta=None):
 
     c.setFont("Helvetica", 7.5)
     c.setFillColor(hexc("#52606d"))
-    c.drawString(M, curr_y, "Grey bands = weekend (Fri & Sat)  |  Diamond = Milestone  |  Black bar = stage summary  |  Red dashed line = today")
+    c.drawString(
+        M, curr_y,
+        "Grey bands = weekend (Fri & Sat)  |  Diamond = Milestone  |  Black bar = stage summary  |  Green dashed = stage end  |  Red dashed = today"
+    )
     c.drawRightString(PW - M, PH - M - 15, f"Generated: {today:%d-%b-%Y}")
 
     # Header backgrounds
@@ -494,12 +515,10 @@ def build_wbs_pdf(df, today, meta=None):
         c.line(M, y_bot, X0 + TL_W, y_bot)
 
         if row[0] == "stage":
-            _, stage, s_all, e_all, wd, ps, pe, col = row
-            c.setFillColor(hexc(col))
-            c.rect(M + W[0] + 4, y_bot + (row_h - 6) / 2, 6, 6, stroke=0, fill=1)
+            _, stage, s_all, e_all, wd, ps, pe = row
             c.setFillColor(hexc("#1f2933"))
             c.setFont("Helvetica-Bold", fs)
-            c.drawString(M + W[0] + 14, ty, fit(stage, "Helvetica-Bold", fs, W[1] - 18))
+            c.drawString(M + W[0] + 6, ty, fit(stage, "Helvetica-Bold", fs, W[1] - 10))
             c.drawString(M + W[0] + W[1] + 4, ty, fmt(s_all))
             c.drawString(M + W[0] + W[1] + W[2] + 4, ty, fmt(e_all))
             c.drawRightString(M + sum(W[:5]) - 4, ty, str(wd))
@@ -569,6 +588,16 @@ def build_wbs_pdf(df, today, meta=None):
                 else:
                     c.drawRightString(bx - 3, ty, lab)
 
+    # Vertical dashed green lines at each Stage end
+    for se in stage_end_dates:
+        if origin <= se < last:
+            sx = x_of(se) + dpx
+            c.setStrokeColor(hexc("#16a34a"))
+            c.setLineWidth(1.0)
+            c.setDash(3, 2)
+            c.line(sx, body_bot, sx, body_top + HDR_H)
+    c.setDash()
+
     c.setStrokeColor(hexc("#d3d8df"))
     c.setLineWidth(0.3)
     x = M
@@ -595,9 +624,8 @@ def build_wbs_pdf(df, today, meta=None):
     c.rect(M, body_bot, LW + TL_W, body_top - body_bot + HDR_H, stroke=1, fill=0)
     c.line(M, body_top, X0 + TL_W, body_top)
 
-    # ---- Note at the bottom of the page (from Sheet2) ----
     if note_lines:
-        ny = body_bot - 20  # below the "Today" label
+        ny = body_bot - 20
         c.setStrokeColor(hexc("#9aa4b2"))
         c.setLineWidth(0.5)
         c.line(M, ny + 8, PW - M, ny + 8)
@@ -625,7 +653,6 @@ with col_a:
 with col_b:
     st.link_button("🔗 Open Google Sheet", f"https://docs.google.com/spreadsheets/d/{WBS_SHEET_ID}/edit")
 
-# Load Sheet2 meta and WBS data
 meta_info = load_project_meta(WBS_SHEET_ID, META_SHEET_NAME, META_GID)
 
 try:
@@ -641,7 +668,6 @@ except Exception as e:
 if not meta_info.get("note"):
     st.warning("⚠️ The Note was not found in Sheet2 (expected 'Note' in column A and the text in column B).")
 
-# Project info card from Sheet2
 if any([meta_info.get("project start date"), meta_info.get("project end date"), meta_info.get("note")]):
     with st.container():
         c1, c2, c3 = st.columns([1.5, 1.5, 3])
@@ -654,6 +680,9 @@ stage_col = _pick_col(df, "stage")
 task_col = _pick_col(df, "task", "work package")
 disc_col = _pick_col(df, "discipline")
 resp_col = _pick_col(df, "responsible")
+entry_col = _pick_col(df, "entry type", "entry_type", "type")
+if entry_col is None and len(df.columns) >= 6:
+    entry_col = df.columns[5]  # العمود F كخيار احتياطي
 
 df = df[df["End Date"] >= df["Start Date"]].copy()
 df["IsMilestone"] = (df["Start Date"].dt.date == df["End Date"].dt.date)
@@ -729,6 +758,7 @@ df["Task"] = task
 df["Stage"] = _txt(stage_col, "-")
 df["Disc"] = _txt(disc_col, "-")
 df["Resp"] = _txt(resp_col, "-")
+df["EntryType"] = _txt(entry_col, "General")
 
 df = df.sort_values(["Start", "End"]).reset_index(drop=True)
 
@@ -750,13 +780,24 @@ if n_wk:
         + ("Their bars were snapped to the nearest working day." if snap else "Bars shown with original dates.")
     )
 
+# ---- Entry Type Color Legend ----
+unique_entries = sorted(df["EntryType"].dropna().astype(str).unique())
+entry_legend_map = {et: PALETTE[i % len(PALETTE)] for i, et in enumerate(unique_entries)}
+if unique_entries:
+    legend_items = " &nbsp;&nbsp;|&nbsp;&nbsp; ".join(
+        f"<span style='display:inline-block;width:10px;height:10px;background:{entry_legend_map[et]};"
+        f"border-radius:2px;margin-right:4px;vertical-align:middle;'></span><b>{_html.escape(et)}</b>"
+        for et in unique_entries
+    )
+    st.markdown(f"<div style='font-size:12px;margin-bottom:6px;'>Entry Type colors: {legend_items}</div>", unsafe_allow_html=True)
+
 # ---- Interactive Gantt Chart ----
 df["Code"] = _txt(code_col)
 html_doc, comp_h = build_wbs_html(df, zoom, today)
 components.html(html_doc, height=comp_h, scrolling=False)
 st.caption(
     "Left: WBS table (Start / End / Department). Right: timeline - grey bands = weekend (Friday & Saturday), "
-    "diamonds = Milestones, black bars = stage summary, red dashed line = today. "
+    "diamonds = Milestones, black bars = stage summary, green dashed line = stage end, red dashed line = today. "
     "Working days are counted Sunday to Thursday only."
 )
 
@@ -776,6 +817,7 @@ except ImportError:
 with st.expander("📋 Data table"):
     show = pd.DataFrame({
         "WBS Code": df["Code"],
+        "Entry Type": df["EntryType"],
         "Type": np.where(df["IsMilestone"], "Milestone", "Task"),
         "Stage": df["Stage"],
         "Task": df["Task"],
